@@ -1,5 +1,5 @@
 --[[
-    PuckAFK | Magic Loot | Autofarm v4.2 RELEASE
+    PuckAFK | Magic Loot | Autofarm v4.2.1 RELEASE
     Place: 133188236593503
     Release build with responsive desktop / phone interface.
 ]]
@@ -22,8 +22,9 @@ if type(getgenv) == "function" then
 else
     GENV = _G
 end
-local SCRIPT_KEY = "__PUCKAFK_MAGIC_LOOT_DIRECT_V4_2"
+local SCRIPT_KEY = "__PUCKAFK_MAGIC_LOOT_DIRECT_V4_2_1"
 for _, oldKey in ipairs({
+    "__PUCKAFK_MAGIC_LOOT_DIRECT_V4_2",
     "__PUCKAFK_MAGIC_LOOT_DIRECT_V4_1",
     "__PUCKAFK_MAGIC_LOOT_DIRECT_V4_0",
     "__PUCKAFK_MAGIC_LOOT_DIRECT_V3_9",
@@ -4170,225 +4171,15 @@ function Farm.UI.button(tab, name, callback)
     tab:CreateButton({ Name = name, Callback = callback })
 end
 
-Farm.UIResponsive = Farm.UIResponsive or {}
-Farm.UIResponsive.Input = game:GetService("UserInputService")
-GENV.__PUCKAFK_RESPONSIVE_UI_STATE = GENV.__PUCKAFK_RESPONSIVE_UI_STATE or {
-    LayoutMode = "Auto",
-    ScalePercent = 100,
-    Windows = setmetatable({}, { __mode = "k" }),
-}
-Farm.UIResponsive.State = GENV.__PUCKAFK_RESPONSIVE_UI_STATE
-Farm.UIResponsive.State.LayoutMode = tostring(Farm.UIResponsive.State.LayoutMode or "Auto")
-Farm.UIResponsive.State.ScalePercent = math.clamp(tonumber(Farm.UIResponsive.State.ScalePercent) or 100, 75, 125)
-Farm.UIResponsive.State.Windows = Farm.UIResponsive.State.Windows or setmetatable({}, { __mode = "k" })
-Farm.UIResponsive.BaseRows = setmetatable({}, { __mode = "k" })
-Farm.UIResponsive.BaseText = setmetatable({}, { __mode = "k" })
-Farm.UIResponsive.SettingsPath = "PuckAFK/Configs/_ui_layout.json"
-
-function Farm.UIResponsive.loadSettings()
-    if type(isfile) ~= "function" or type(readfile) ~= "function" then return end
-    local okExists, exists = pcall(isfile, Farm.UIResponsive.SettingsPath)
-    if not okExists or not exists then return end
-    local okRead, text = pcall(readfile, Farm.UIResponsive.SettingsPath)
-    if not okRead or type(text) ~= "string" then return end
-    local okDecode, data = pcall(function()
-        return game:GetService("HttpService"):JSONDecode(text)
-    end)
-    if not okDecode or type(data) ~= "table" then return end
-    if data.LayoutMode == "Auto" or data.LayoutMode == "Desktop" or data.LayoutMode == "Phone" then
-        Farm.UIResponsive.State.LayoutMode = data.LayoutMode
-    end
-    Farm.UIResponsive.State.ScalePercent = math.clamp(
-        tonumber(data.ScalePercent) or Farm.UIResponsive.State.ScalePercent,
-        75,
-        125
-    )
-end
-
-function Farm.UIResponsive.saveSettings()
-    if type(writefile) ~= "function" then return end
-    if type(makefolder) == "function" then
-        pcall(makefolder, "PuckAFK")
-        pcall(makefolder, "PuckAFK/Configs")
-    end
-    local okEncode, text = pcall(function()
-        return game:GetService("HttpService"):JSONEncode({
-            LayoutMode = Farm.UIResponsive.State.LayoutMode,
-            ScalePercent = Farm.UIResponsive.State.ScalePercent,
-        })
-    end)
-    if okEncode and type(text) == "string" then
-        pcall(writefile, Farm.UIResponsive.SettingsPath, text)
-    end
-end
-
-function Farm.UIResponsive.viewport()
-    local camera = Workspace.CurrentCamera
-    if camera and camera.ViewportSize.X > 0 and camera.ViewportSize.Y > 0 then
-        return camera.ViewportSize
-    end
-    return Vector2.new(1280, 720)
-end
-
-function Farm.UIResponsive.detectedLayout()
-    local viewport = Farm.UIResponsive.viewport()
-    local shortSide = math.min(viewport.X, viewport.Y)
-    local touchPhone = Farm.UIResponsive.Input.TouchEnabled and (shortSide <= 700 or viewport.X <= 900)
-    local lowResolution = viewport.X < 620 or viewport.Y < 430
-    return (touchPhone or lowResolution) and "Phone" or "Desktop"
-end
-
-function Farm.UIResponsive.activeLayout()
-    local mode = Farm.UIResponsive.State.LayoutMode
-    if mode == "Phone" or mode == "Desktop" then return mode end
-    return Farm.UIResponsive.detectedLayout()
-end
-
-function Farm.UIResponsive.reflowTab(tab, phone)
-    if type(tab) ~= "table" or type(tab.Columns) ~= "table" then return end
-    local c1, c2 = tab.Columns[1], tab.Columns[2]
-    if not c1 or not c2 then return end
-    local sections = tab.Sections or {}
-    for index, section in ipairs(sections) do
-        if section.Frame then section.Frame.LayoutOrder = index end
-    end
-    if phone then
-        c1.Visible = true
-        c1.Position = UDim2.new(0, 0, 0, 0)
-        c1.Size = UDim2.new(1, 0, 1, 0)
-        c2.Visible = false
-        c2.CanvasPosition = Vector2.new(0, 0)
-        for _, section in ipairs(sections) do
-            if section.Frame and section.Frame.Parent ~= c1 then section.Frame.Parent = c1 end
-        end
-    elseif #sections <= 1 then
-        c1.Visible = true
-        c1.Position = UDim2.new(0, 0, 0, 0)
-        c1.Size = UDim2.new(1, 0, 1, 0)
-        c2.Visible = false
-        c2.CanvasPosition = Vector2.new(0, 0)
-        if sections[1] and sections[1].Frame and sections[1].Frame.Parent ~= c1 then
-            sections[1].Frame.Parent = c1
-        end
-    else
-        c1.Visible = true
-        c2.Visible = true
-        c1.Position = UDim2.new(0, 0, 0, 0)
-        c1.Size = UDim2.new(0.5, -4, 1, 0)
-        c2.Position = UDim2.new(0.5, 4, 0, 0)
-        c2.Size = UDim2.new(0.5, -4, 1, 0)
-        for index, section in ipairs(sections) do
-            local target = ((index - 1) % 2 == 0) and c1 or c2
-            if section.Frame and section.Frame.Parent ~= target then section.Frame.Parent = target end
-        end
-    end
-end
-
-function Farm.UIResponsive.updateTouchSizing(phone)
-    if not Window or not Window.ScreenGui then return end
-    for _, tab in ipairs(Window.Tabs or {}) do
-        for _, section in ipairs(tab.Sections or {}) do
-            local body = section.Body
-            if body then
-                for _, child in ipairs(body:GetChildren()) do
-                    if child:IsA("Frame") then
-                        local base = Farm.UIResponsive.BaseRows[child]
-                        if not base then
-                            base = child.Size.Y.Offset
-                            Farm.UIResponsive.BaseRows[child] = base
-                        end
-                        if base >= 17 then
-                            local target = phone and math.max(24, math.floor(base * 1.20 + 0.5)) or base
-                            child.Size = UDim2.new(child.Size.X.Scale, child.Size.X.Offset, 0, target)
-                        end
-                    end
-                end
-            end
-        end
-    end
-    for _, object in ipairs(Window.ScreenGui:GetDescendants()) do
-        if object:IsA("TextLabel") or object:IsA("TextButton") or object:IsA("TextBox") then
-            local base = Farm.UIResponsive.BaseText[object]
-            if not base then
-                base = object.TextSize
-                Farm.UIResponsive.BaseText[object] = base
-            end
-            object.TextSize = phone and math.max(base, math.min(15, base + 1)) or base
-        end
-    end
-end
-
-function Farm.UIResponsive.apply()
-    if not Window or not Window.Main or not Window.ScreenGui or not Window.ScreenGui.Parent then return end
-    local viewport = Farm.UIResponsive.viewport()
-    local layout = Farm.UIResponsive.activeLayout()
-    local phone = layout == "Phone"
-    local scale = math.clamp(tonumber(Farm.UIResponsive.State.ScalePercent) or 100, 75, 125) / 100
-    if not Farm.UIResponsive.BaseSize then
-        local full = Window.FullSize
-        Farm.UIResponsive.BaseSize = Vector2.new(
-            math.max(360, full and full.X.Offset or 530),
-            math.max(360, full and full.Y.Offset or 590)
-        )
-    end
-    local base = Farm.UIResponsive.BaseSize
-    local width, height
-    if phone then
-        local landscape = viewport.X > viewport.Y
-        width = math.min((landscape and 540 or 400) * scale, viewport.X - 16)
-        height = math.min((landscape and 390 or 640) * scale, viewport.Y - 24)
-        width = math.max(300, width)
-        height = math.max(300, height)
-    else
-        width = base.X * scale
-        height = base.Y * scale
-        local fit = math.min(1, (viewport.X - 28) / width, (viewport.Y - 28) / height)
-        width = math.max(340, width * fit)
-        height = math.max(340, height * fit)
-    end
-    width = math.floor(width + 0.5)
-    height = math.floor(height + 0.5)
-    local fullSize = UDim2.fromOffset(width, height)
-    Window.FullSize = fullSize
-    if not Window.Minimized then Window.Main.Size = fullSize end
-    Window.Main.Position = UDim2.new(0.5, -math.floor(width / 2), 0.5, -math.floor(height / 2))
-    local shadow = Window.ScreenGui:FindFirstChild("Shadow")
-    if shadow then
-        if not Window.Minimized then shadow.Size = fullSize end
-        shadow.Position = UDim2.new(0.5, -math.floor(width / 2) + 4, 0.5, -math.floor(height / 2) + 4)
-    end
-    for _, tab in ipairs(Window.Tabs or {}) do Farm.UIResponsive.reflowTab(tab, phone) end
-    Farm.UIResponsive.updateTouchSizing(phone)
-    if Window.NotificationHolder then
-        local notifyWidth = math.max(220, math.min(290, viewport.X - 16))
-        Window.NotificationHolder.Size = UDim2.fromOffset(notifyWidth, math.max(220, viewport.Y - 20))
-        Window.NotificationHolder.Position = UDim2.new(1, -8, 0, 8)
-    end
-    if Farm.UIResponsive.StatusLabel and Farm.UIResponsive.StatusLabel.Set then
-        Farm.UIResponsive.StatusLabel:Set(string.format(
-            "Detected: %s • %dx%d • Active: %s • %d%%",
-            Farm.UIResponsive.detectedLayout(),
-            math.floor(viewport.X),
-            math.floor(viewport.Y),
-            layout,
-            math.floor(Farm.UIResponsive.State.ScalePercent)
-        ))
-    end
-end
-
-function Farm.UIResponsive.applyAll()
-    for _, manager in pairs(Farm.UIResponsive.State.Windows) do
-        if type(manager) == "table" and type(manager.apply) == "function" then
-            pcall(manager.apply)
-        end
-    end
-end
-
-Farm.UIResponsive.loadSettings()
+-- Responsive layout, phone/desktop detection, scaling and centering are
+-- owned by shared PuckUI v3.5+. Do not add a second layout engine here.
 if Window then
     local FarmTab, GearTab = Window:CreateTab("Farm"), Window:CreateTab("Gear")
     local DungeonTab, RewardsTab = Window:CreateTab("Dungeon"), Window:CreateTab("Rewards")
     local SettingsTab = Window:CreateTab("Settings")
+    if Window.Center then
+        task.defer(function() pcall(function() Window:Center() end) end)
+    end
     FarmTab:CreateSection("Smart Progression")
     StatusParagraph = FarmTab:CreateParagraph({ Title = "Magic Loot Autofarm", Content = "Starting...", Height = 112 })
     Farm.UI.toggle(FarmTab, "Master Autofarm", "Master", "MagicLoot_Master", function()
@@ -4492,37 +4283,6 @@ if Window then
             pcall(claimIndexRewards)
         end)
     end)
-    SettingsTab:CreateSection("Display")
-    SettingsTab:CreateDropdown({
-        Name = "UI Layout",
-        Options = { "Auto", "Desktop", "Phone" },
-        CurrentOption = { Farm.UIResponsive.State.LayoutMode },
-        NoConfig = true,
-        Callback = function(value)
-            value = type(value) == "table" and value[1] or value
-            value = tostring(value or "Auto")
-            if value ~= "Auto" and value ~= "Desktop" and value ~= "Phone" then value = "Auto" end
-            Farm.UIResponsive.State.LayoutMode = value
-            Farm.UIResponsive.saveSettings()
-            Farm.UIResponsive.applyAll()
-        end,
-    })
-    SettingsTab:CreateSlider({
-        Name = "UI Size %",
-        Range = { 75, 125 },
-        Increment = 5,
-        CurrentValue = Farm.UIResponsive.State.ScalePercent,
-        NoConfig = true,
-        Callback = function(value)
-            Farm.UIResponsive.State.ScalePercent = math.clamp(tonumber(value) or 100, 75, 125)
-            Farm.UIResponsive.saveSettings()
-            Farm.UIResponsive.applyAll()
-        end,
-    })
-    Farm.UIResponsive.StatusLabel = SettingsTab:CreateLabel("Detecting display...")
-    SettingsTab:CreateLabel("Auto uses a single-column touch layout on phones and low-resolution screens.")
-    Farm.UIResponsive.State.Windows[Window] = Farm.UIResponsive
-    task.defer(Farm.UIResponsive.apply)
     SettingsTab:CreateSection("Movement")
     Farm.UI.dropdown(SettingsTab, "Movement Mode", "MovementMode", "MagicLoot_MoveMode", { "Tween", "Walk" }, "Tween")
     Farm.UI.slider(SettingsTab, "Tween Speed", "TweenSpeed", "MagicLoot_TweenSpeed",
@@ -4575,19 +4335,6 @@ task.spawn(function()
         task.wait(0.5)
     end
 end)
-task.spawn(function()
-    local lastViewport = Vector2.zero
-    while Farm.Running do
-        if Window and Farm.UIResponsive then
-            local viewport = Farm.UIResponsive.viewport()
-            if viewport ~= lastViewport then
-                lastViewport = viewport
-                pcall(Farm.UIResponsive.apply)
-            end
-        end
-        task.wait(0.35)
-    end
-end)
 -- ============================================================================
 -- UNLOAD
 -- ============================================================================
@@ -4621,9 +4368,6 @@ function Farm:Unload()
         GENV[SCRIPT_KEY] = nil
     end
     if Window then
-        if Farm.UIResponsive and Farm.UIResponsive.State and Farm.UIResponsive.State.Windows then
-            Farm.UIResponsive.State.Windows[Window] = nil
-        end
         pcall(function() Window:Destroy() end)
     end
 end
