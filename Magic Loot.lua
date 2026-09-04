@@ -1,5 +1,5 @@
 --[[
-    PuckAFK | Magic Loot | Autofarm v4.5 RELEASE
+    PuckAFK | Magic Loot | Autofarm v4.7 RELEASE
     Place: 133188236593503
     Release build with responsive desktop / phone interface.
 ]]
@@ -22,8 +22,10 @@ if type(getgenv) == "function" then
 else
     GENV = _G
 end
-local SCRIPT_KEY = "__PUCKAFK_MAGIC_LOOT_DIRECT_V4_5"
+local SCRIPT_KEY = "__PUCKAFK_MAGIC_LOOT_DIRECT_V4_7"
 for _, oldKey in ipairs({
+    "__PUCKAFK_MAGIC_LOOT_DIRECT_V4_6",
+    "__PUCKAFK_MAGIC_LOOT_DIRECT_V4_5",
     "__PUCKAFK_MAGIC_LOOT_DIRECT_V4_4",
     "__PUCKAFK_MAGIC_LOOT_DIRECT_V4_3",
     "__PUCKAFK_MAGIC_LOOT_DIRECT_V4_2_1",
@@ -2579,27 +2581,169 @@ end
 -- ============================================================================
 -- DUNGEON ECONOMY FARM
 -- ============================================================================
-local function getBroomJumpMax()
+local function getBroomDungeonLimitById(id)
     if not (EnumMgr and EnumMgr.ItemType and EnumMgr.ItemType.Broom) then
         return 0
     end
-    local id = tonumber(getDataValue("NowBroom")) or 0
+    id = tonumber(id) or 0
     if id <= 0 then
         return 0
     end
     local cfg = findCfg(id, EnumMgr.ItemType.Broom)
-    if type(cfg) ~= "table" then
+    if type(cfg) ~= "table" or tonumber(cfg.tp) ~= tonumber(EnumMgr.ItemType.Broom) then
         return 0
     end
     return math.max(0, math.floor(tonumber(cfg.Dungeon) or 0))
 end
-local function getActualJumpMax()
+
+local function getBroomJumpMax()
+    local id = tonumber(equippedId("NowBroom")) or tonumber(getDataValue("NowBroom")) or 0
+    return getBroomDungeonLimitById(id)
+end
+
+-- The native Stage Jump UI uses the equipped broom's Dungeon value. Before each
+-- dungeon session, find the owned broom that reaches the deepest dungeon stage
+-- and equip it. This never buys a broom; Auto Best Broom remains responsible
+-- for purchases/upgrades.
+local function prepareBestOwnedDungeonBroom()
+    if not (EnumMgr and EnumMgr.ItemType and EnumMgr.ItemType.Broom) then
+        return 0, 0
+    end
+
+    local broomType = EnumMgr.ItemType.Broom
+    local bestId = 0
+    local bestLimit = 0
+    local bestSort = -math.huge
+    local seen = {}
+
+    local function consider(id)
+        id = tonumber(id) or 0
+        if id <= 0 or seen[id] then
+            return
+        end
+        seen[id] = true
+        if not ownsItem(id, broomType) then
+            return
+        end
+        local cfg = findCfg(id, broomType)
+        if type(cfg) ~= "table" or not gearAllowedByRebirth(cfg) then
+            return
+        end
+        local limit = math.max(0, math.floor(tonumber(cfg.Dungeon) or 0))
+        local sort = tonumber(cfg.Sort) or 0
+        if limit > bestLimit or (limit == bestLimit and limit > 0 and sort > bestSort) then
+            bestId = id
+            bestLimit = limit
+            bestSort = sort
+        end
+    end
+
+    consider(equippedId("NowBroom"))
+    for _, item in pairs(getBag()) do
+        if type(item) == "table" and tonumber(item.tp) == tonumber(broomType)
+            and (tonumber(item.count) or 1) > 0 then
+            consider(item.id)
+        end
+    end
+
+    if bestId <= 0 then
+        return 0, 0
+    end
+
+    local currentId = tonumber(equippedId("NowBroom")) or 0
+    if currentId ~= bestId then
+        equipOwnedVerified(bestId, broomType, "NowBroom", "Broom")
+        currentId = tonumber(equippedId("NowBroom")) or currentId
+    end
+
+    -- Prefer the value that is actually replicated as equipped. If replication
+    -- is slightly delayed but the server accepted the equip, keep the selected
+    -- broom limit as a short-lived fallback for the immediately following jump.
+    local equippedLimit = getBroomDungeonLimitById(currentId)
+    if currentId == bestId and equippedLimit > 0 then
+        return bestId, equippedLimit
+    end
+    return bestId, math.max(equippedLimit, bestLimit)
+end
+
+local function getActualJumpMax(broomLimitOverride)
     local career = getCareerMaxStage()
-    local broom = getBroomJumpMax()
+    local broom = math.max(0, math.floor(tonumber(broomLimitOverride) or getBroomJumpMax()))
     if career <= 0 or broom <= 0 then
         return 0
     end
     return math.max(0, math.min(career + 1, broom))
+end
+
+-- Match the game's Stage Jump menu: only stages with a TeleIcon are actual
+-- teleport destinations. Pick the deepest such destination the current broom
+-- and career progress can reach.
+local function getFurthestTeleportStage(maxJump)
+    maxJump = math.max(0, math.floor(tonumber(maxJump) or 0))
+    if maxJump <= 0 then
+        return 0
+    end
+    if not (CfgFind and type(CfgFind.GetCfgByName) == "function") then
+        return maxJump
+    end
+
+    local ok, dungeonCfg = pcall(CfgFind.GetCfgByName, "dungeonConf")
+    if not ok or type(dungeonCfg) ~= "table" then
+        return maxJump
+    end
+
+    local furthest = 0
+    for id, cfg in pairs(dungeonCfg) do
+        local stage = tonumber(id)
+        local teleIcon = type(cfg) == "table" and cfg.TeleIcon or nil
+        if stage and stage > 0 and stage <= maxJump
+            and type(teleIcon) == "string" and teleIcon ~= "" then
+            furthest = math.max(furthest, math.floor(stage))
+        end
+    end
+    return furthest > 0 and furthest or maxJump
+end
+
+local function waitForBroomStageJumpLanding(targetStage, timeout)
+    local started = os.clock()
+    local deadline = started + math.max(2, tonumber(timeout) or 8)
+    local sawJump = false
+    local sawDungeon = false
+
+    while Farm.Running and os.clock() < deadline do
+        local jumping = isStageJumping()
+        local inDungeon = isInDungeon()
+        sawJump = sawJump or jumping
+        sawDungeon = sawDungeon or inDungeon
+
+        local currentStage = 0
+        if Farm.Dungeon and type(Farm.Dungeon.currentStageId) == "function" then
+            local okStage, stage = pcall(Farm.Dungeon.currentStageId)
+            if okStage then currentStage = math.max(0, math.floor(tonumber(stage) or 0)) end
+        end
+
+        -- Do not begin normal farming while the broom jump is still animating.
+        -- Once landed, either the requested stage or any live dungeon stage is
+        -- enough to hand control back to the normal dungeon driver.
+        if not jumping and inDungeon then
+            if currentStage >= targetStage or (sawJump and currentStage > 0) then
+                Farm.Runtime.LastDungeonStage = math.max(Farm.Runtime.LastDungeonStage or 0, currentStage, targetStage)
+                return true
+            end
+            if not sawJump and os.clock() - started >= 1.6 and currentStage > 0 then
+                return true
+            end
+        end
+
+        -- If the request was rejected, stop waiting and let the normal walk-in
+        -- route take over instead of stalling the whole autofarm.
+        if not sawJump and not sawDungeon and os.clock() - started >= 1.75 then
+            return false
+        end
+        task.wait(0.035)
+    end
+
+    return isInDungeon() and not isStageJumping()
 end
 local function getNextBattleArea()
     local stage = getRunMaxClear() + 1
@@ -3722,31 +3866,31 @@ function Farm.Loot.autoPickupTick()
 end
 
 local function tryEnterDungeon()
-    if isInDungeon() then return true end
+    if isInDungeon() and not isStageJumping() then return true end
+
+    Farm.Fast.stopTrainingForDungeonFast()
+
+    -- Equip the owned broom with the highest dungeon reach before asking the
+    -- game's native Stage Jump system for the deepest valid teleport destination.
+    local _, broomLimit = prepareBestOwnedDungeonBroom()
+    local jumpMax = getActualJumpMax(broomLimit)
+    local jumpStage = getFurthestTeleportStage(jumpMax)
+    if jumpStage > 0 and NetMsg.STAGE_JUMP_REQUEST then
+        setPhase("Broom jump to dungeon stage " .. tostring(jumpStage))
+        local requested = safeFire(NetMsg.STAGE_JUMP_REQUEST, jumpStage)
+        if requested and waitForBroomStageJumpLanding(jumpStage, 8) then
+            Farm.Runtime.LastDungeonStage = math.max(Farm.Runtime.LastDungeonStage or 0, jumpStage)
+            if Farm.Config.AutoHoldBestWand then
+                Farm.Fast.prepareWandForDungeon("broom jump landed")
+            end
+            return true
+        end
+    end
+
     if Farm.Config.AutoHoldBestWand then
         Farm.Fast.prepareWandForDungeon("enter dungeon")
     end
-    local jump = getActualJumpMax()
-    if jump > 0 then
-        safeFire(NetMsg.STAGE_JUMP_REQUEST, jump)
-        local started = os.clock()
-        local deadline = started + 6
-        local sawJump = false
-        while Farm.Running and os.clock() < deadline do
-            if isInDungeon() then return true end
-            if isStageJumping() then
-                sawJump = true
-            elseif sawJump then
-                task.wait(0.05)
-                if isInDungeon() then return true end
-                break
-            elseif os.clock() - started >= 1.25 then
-                break
-            end
-            task.wait(0.035)
-        end
-        if sawJump and isStageJumping() then return false end
-    end
+
     local area, stage = getNextBattleArea()
     if area and acquireMovement("Dungeon", 24) then
         setPhase("Entering dungeon stage " .. tostring(stage))
@@ -4342,7 +4486,7 @@ if PuckUI then
 end
 Farm.UI = Farm.UI or {}
 function Farm.UI.toggle(tab, name, key, flag, after)
-    tab:CreateToggle({
+    return tab:CreateToggle({
         Name = name, CurrentValue = Farm.Config[key], Flag = flag,
         Callback = function(v)
             v = v == true
@@ -4352,7 +4496,7 @@ function Farm.UI.toggle(tab, name, key, flag, after)
     })
 end
 function Farm.UI.slider(tab, name, key, flag, range, increment, normalize)
-    tab:CreateSlider({
+    return tab:CreateSlider({
         Name = name, Range = range, Increment = increment,
         CurrentValue = Farm.Config[key], Flag = flag,
         Callback = function(v)
@@ -4363,7 +4507,7 @@ end
 function Farm.UI.dropdown(tab, name, key, flag, options, fallback, after)
     local allowed = {}
     for _, option in ipairs(options) do allowed[option] = true end
-    tab:CreateDropdown({
+    return tab:CreateDropdown({
         Name = name, Options = options, CurrentOption = { Farm.Config[key] }, Flag = flag,
         Callback = function(value)
             value = type(value) == "table" and value[1] or value
@@ -4372,129 +4516,197 @@ function Farm.UI.dropdown(tab, name, key, flag, options, fallback, after)
         end,
     })
 end
+function Farm.UI.mappedDropdown(tab, name, key, flag, rows, fallbackValue, after)
+    local labels, valueByLabel, labelByValue = {}, {}, {}
+    for _, row in ipairs(rows) do
+        labels[#labels + 1] = row[1]
+        valueByLabel[row[1]] = row[2]
+        labelByValue[row[2]] = row[1]
+    end
+    local currentLabel = labelByValue[Farm.Config[key]] or labelByValue[fallbackValue] or labels[1]
+    return tab:CreateDropdown({
+        Name = name,
+        Options = labels,
+        CurrentOption = { currentLabel },
+        Flag = flag,
+        Callback = function(value)
+            value = type(value) == "table" and value[1] or value
+            Farm.Config[key] = valueByLabel[value] or fallbackValue
+            if after then after(Farm.Config[key]) end
+        end,
+    })
+end
 function Farm.UI.button(tab, name, callback)
-    tab:CreateButton({ Name = name, Callback = callback })
+    return tab:CreateButton({ Name = name, Callback = callback })
 end
 
 -- Responsive layout, phone/desktop detection, scaling and centering are
--- owned by shared PuckUI v3.5+. Do not add a second layout engine here.
+-- owned by shared PuckUI v3.5+. The release UI intentionally keeps the main
+-- tabs simple; low-level tuning lives in Advanced instead of competing with
+-- the controls a normal player actually needs.
 if Window then
-    local FarmTab, GearTab = Window:CreateTab("Farm"), Window:CreateTab("Gear")
-    local DungeonTab, RewardsTab = Window:CreateTab("Dungeon"), Window:CreateTab("Rewards")
+    local FarmTab = Window:CreateTab("Farm")
+    local GearTab = Window:CreateTab("Gear")
+    local DungeonTab = Window:CreateTab("Dungeon")
+    local RewardsTab = Window:CreateTab("Rewards")
     local SettingsTab = Window:CreateTab("Settings")
+    local AdvancedTab = Window:CreateTab("Advanced")
+
+    local SmartLootAdvancedSection = nil
+    local AutoSellAdvancedSection = nil
+    local OrbitAdvancedSection = nil
+    local SmoothMovementAdvancedSection = nil
+    local function refreshAdvancedVisibility()
+        if SmartLootAdvancedSection and SmartLootAdvancedSection.Frame then
+            SmartLootAdvancedSection.Frame.Visible = tostring(Farm.Config.LootPriority or "Smart") == "Smart"
+        end
+        if AutoSellAdvancedSection and AutoSellAdvancedSection.Frame then
+            AutoSellAdvancedSection.Frame.Visible = Farm.Config.AutoSellMaterials == true
+        end
+        if OrbitAdvancedSection and OrbitAdvancedSection.Frame then
+            OrbitAdvancedSection.Frame.Visible = tostring(Farm.Config.DungeonPositionMode or "Overhead") == "Orbit"
+        end
+        if SmoothMovementAdvancedSection and SmoothMovementAdvancedSection.Frame then
+            SmoothMovementAdvancedSection.Frame.Visible = tostring(Farm.Config.MovementMode or "Tween") == "Tween"
+        end
+    end
+
     if Window.Center then
         task.defer(function() pcall(function() Window:Center() end) end)
     end
-    FarmTab:CreateSection("Smart Progression")
-    Farm.UI.toggle(FarmTab, "Master Autofarm", "Master", "MagicLoot_Master", function()
+
+    -- FARM: only the controls needed for normal progression.
+    FarmTab:CreateSection("Autofarm")
+    Farm.UI.toggle(FarmTab, "Master Autofarm", "Master", "MagicLoot_v46_Master", function()
         Farm.Runtime.LastTrainDecisionAt = -math.huge
     end)
-    Farm.UI.toggle(FarmTab, "Smart Power Farming (Everywhere)", "AutoTrain", "MagicLoot_AutoTrain", function()
+    Farm.UI.toggle(FarmTab, "Auto Power", "AutoTrain", "MagicLoot_v46_AutoPower", function()
         Farm.Runtime.LastTrainDecisionAt = -math.huge
     end)
-    Farm.UI.toggle(FarmTab, "Auto Rebirth", "AutoRebirth", "MagicLoot_Rebirth")
-    Farm.UI.toggle(FarmTab, "Auto Power / Training Potions", "AutoTrainingPotion", "MagicLoot_Potions")
-    Farm.UI.toggle(FarmTab, "Auto Use Luck Potions", "AutoLuckPotion", "MagicLoot_v15_LuckPotion")
-    Farm.UI.button(FarmTab, "Recalculate Best Training Now", function()
-        Farm.Runtime.LastTrainDecisionAt = -math.huge
-        task.spawn(function() pcall(refreshTrainingDecision, true) end)
+    Farm.UI.toggle(FarmTab, "Auto Rebirth", "AutoRebirth", "MagicLoot_v46_Rebirth")
+
+    FarmTab:CreateSection("Consumables")
+    Farm.UI.toggle(FarmTab, "Auto Training Potions", "AutoTrainingPotion", "MagicLoot_v46_TrainingPotions")
+    Farm.UI.toggle(FarmTab, "Auto Luck Potions", "AutoLuckPotion", "MagicLoot_v46_LuckPotions")
+
+    -- GEAR: automatic choices only. Manual test/force-buy buttons were removed.
+    GearTab:CreateSection("Automatic Gear")
+    Farm.UI.toggle(GearTab, "Auto Best Wand", "AutoWeapon", "MagicLoot_v46_Wand")
+    Farm.UI.toggle(GearTab, "Auto Best Armor", "AutoArmor", "MagicLoot_v46_Armor")
+    Farm.UI.toggle(GearTab, "Auto Best Broom", "AutoBroom", "MagicLoot_v46_Broom")
+
+    -- DUNGEON: the whole normal dungeon experience fits into three small groups.
+    DungeonTab:CreateSection("Dungeon Autofarm")
+    Farm.UI.toggle(DungeonTab, "Auto Dungeon", "AutoDungeonEconomy", "MagicLoot_v46_Dungeon")
+    Farm.UI.toggle(DungeonTab, "Auto Loot", "AutoDungeonLoot", "MagicLoot_v46_Loot")
+    Farm.UI.toggle(DungeonTab, "Auto Sell", "AutoSellMaterials", "MagicLoot_v46_Sell", function()
+        refreshAdvancedVisibility()
     end)
-    GearTab:CreateSection("Automatic Equipment")
-    Farm.UI.toggle(GearTab, "Auto Best Wand", "AutoWeapon", "MagicLoot_v17_Wand")
-    Farm.UI.toggle(GearTab, "Always Hold Best Wand", "AutoHoldBestWand", "MagicLoot_v34_HoldBestWand", function(v)
-        if v then task.spawn(function() pcall(Farm.Fast.ensureBestWandHeld, "toggle", 0.18) end) end
+
+    DungeonTab:CreateSection("Loot Strategy")
+    Farm.UI.mappedDropdown(DungeonTab, "Loot Mode", "LootPriority", "MagicLoot_v46_LootMode", {
+        { "Smart (Recommended)", "Smart" },
+        { "Highest Rarity", "Rarity" },
+        { "Highest Value", "Value" },
+        { "Nearest Drop", "Nearest" },
+    }, "Smart", function()
+        refreshAdvancedVisibility()
     end)
-    Farm.UI.toggle(GearTab, "Auto Best Armor", "AutoArmor", "MagicLoot_v17_Armor")
-    Farm.UI.toggle(GearTab, "Auto Best Broom", "AutoBroom", "MagicLoot_v17_Broom")
-    Farm.UI.button(GearTab, "Run Gear Upgrade Now", function()
-        task.spawn(function() pcall(Farm.Fast.gearTick, true) end)
+
+    DungeonTab:CreateSection("Combat Position")
+    Farm.UI.mappedDropdown(DungeonTab, "Position", "DungeonPositionMode", "MagicLoot_v46_Position", {
+        { "Overhead (Recommended)", "Overhead" },
+        { "Behind", "Behind" },
+        { "Front", "Front" },
+        { "Side", "Side" },
+        { "Left", "Left" },
+        { "Below", "Below" },
+        { "Orbit", "Orbit" },
+        { "Normal", "Normal" },
+    }, "Overhead", function(v)
+        if v == "Normal" then Farm.Position.release(false) end
+        refreshAdvancedVisibility()
     end)
-    Farm.UI.button(GearTab, "Buy ALL Affordable Gear Now", function()
-        task.spawn(function()
-            Farm.Runtime.LastGearAt = -math.huge
-            for _ = 1, 5 do
-                pcall(Farm.Fast.gearTick, true)
-                task.wait(0.20)
-                local _, _, price = Farm.Fast.getNextAffordableGearNow()
-                if not price then break end
-            end
-        end)
-    end)
-    DungeonTab:CreateSection("Gold / Material Economy")
-    Farm.UI.toggle(DungeonTab, "Smart Dungeon Economy", "AutoDungeonEconomy", "MagicLoot_Dungeon")
-    Farm.UI.toggle(DungeonTab, "Collect Dungeon Loot", "AutoDungeonLoot", "MagicLoot_Loot")
-    Farm.UI.dropdown(DungeonTab, "Loot Priority", "LootPriority", "MagicLoot_v40_LootPriority",
-        { "Smart", "Rarity", "Value", "Nearest" }, "Smart")
-    Farm.UI.toggle(DungeonTab, "Prioritize New Collection Index Loot", "PrioritizeUnseenIndexLoot", "MagicLoot_v40_IndexLoot")
-    Farm.UI.slider(DungeonTab, "Smart Loot Quality %", "SmartLootQualityPercent", "MagicLoot_v45_SmartLootQuality",
-        { 30, 95 }, 5, function(v) return math.clamp(tonumber(v) or 65, 30, 95) end)
-    Farm.UI.toggle(DungeonTab, "Auto Sell Materials", "AutoSellMaterials", "MagicLoot_v14_Sell")
-    Farm.UI.slider(DungeonTab, "Return To Sell At %", "AutoSellThresholdPercent", "MagicLoot_v15_SellThreshold",
-        { 60, 100 }, 1, function(v) return math.clamp(tonumber(v) or 100, 60, 100) end)
-    Farm.UI.slider(DungeonTab, "Keep Free Backpack Slots", "BackpackReserveSlots", "MagicLoot_v15_DungeonBagReserve",
-        { 0, 5 }, 1, function(v) return math.clamp(math.floor(tonumber(v) or 0), 0, 5) end)
-    Farm.UI.toggle(DungeonTab, "Temporarily Unmark Recipe To Sell", "TemporarilyUnmarkAlchemyForSell", "PuckMagic_UnmarkForSell")
-    Farm.UI.toggle(DungeonTab, "Resume Dungeon After Selling", "ResumeDungeonAfterSell", "MagicLoot_v14_ResumeAfterSell")
-    DungeonTab:CreateSection("Combat Positioning")
-    Farm.UI.toggle(DungeonTab, "Wait For Boss Intro", "WaitForBossIntro", "MagicLoot_BossIntro")
-    Farm.UI.toggle(DungeonTab, "Keep Safe Position Between Enemies", "PersistCombatPosition", "MagicLoot_PersistCombatPosition")
-    Farm.UI.slider(DungeonTab, "Enemy Handoff Hold", "TargetSwitchGraceSeconds", "MagicLoot_TargetSwitchGrace",
-        { 0.05, 0.8 }, 0.05, function(v) return math.clamp(tonumber(v) or 0.20, 0.05, 0.8) end)
-    Farm.UI.slider(DungeonTab, "Enemy Distance", "DungeonEnemyRange", "MagicLoot_v44_EnemyDistance",
+    Farm.UI.slider(DungeonTab, "Distance", "DungeonEnemyRange", "MagicLoot_v46_EnemyDistance",
         { 6, 55 }, 1, function(v) return math.clamp(tonumber(v) or 19, 6, 55) end)
-    Farm.UI.dropdown(DungeonTab, "Enemy Position Mode", "DungeonPositionMode", "MagicLoot_v44_PositionMode",
-        { "Normal", "Behind", "Front", "Side", "Left", "Overhead", "Below", "Orbit" }, "Overhead",
-        function(v) if v == "Normal" then Farm.Position.release(false) end end)
-    Farm.UI.toggle(DungeonTab, "Direct Enemy Lock", "CombatDirectLock", "MagicLoot_DirectEnemyLock")
-    Farm.UI.toggle(DungeonTab, "Combat Noclip", "CombatNoclip", "MagicLoot_CombatNoclip", function(v)
-        if not v then Farm.Position.setNoclip(false) end
-    end)
-    Farm.UI.toggle(DungeonTab, "Always Face Enemy", "CombatFaceTarget", "MagicLoot_CombatFaceTarget")
-    Farm.UI.slider(DungeonTab, "Orbit Speed", "DungeonOrbitSpeed", "MagicLoot_OrbitSpeed",
-        { 0.1, 2.0 }, 0.1, function(v) return math.max(0.1, tonumber(v) or 0.65) end)
-    DungeonTab:CreateSection("Dungeon Timing")
-    Farm.UI.slider(DungeonTab, "Dungeon Re-entry Attempts", "DungeonReentryAttempts", "PuckMagic_DungeonReentryAttempts",
-        { 1, 6 }, 1, function(v) return math.clamp(math.floor(tonumber(v) or 3), 1, 6) end)
-    Farm.UI.slider(DungeonTab, "Dungeon Burst Seconds", "DungeonBurstSeconds", "MagicLoot_DungeonBurst",
-        { 10, 90 }, 1, function(v) return tonumber(v) or 28 end)
-    Farm.UI.slider(DungeonTab, "Dungeon Cooldown Seconds", "DungeonCooldownSeconds", "MagicLoot_DungeonCooldown",
-        { 30, 300 }, 5, function(v) return tonumber(v) or 28 end)
-    Farm.UI.button(DungeonTab, "Run Dungeon Burst Now", function()
-        Farm.Runtime.LastDungeonAt = -math.huge
-        task.spawn(function() pcall(runDungeonBurst) end)
-    end)
-    Farm.UI.button(DungeonTab, "Return & Sell Materials Now", function()
-        task.spawn(function()
-            if isInDungeon() then pcall(returnToTownAndSell, "Manual sell") else pcall(sellMaterials) end
-        end)
-    end)
+
+    -- REWARDS: use outcome-focused language rather than game-internal names.
     RewardsTab:CreateSection("Automatic Rewards")
-    Farm.UI.toggle(RewardsTab, "Redeem Known Codes Once", "AutoCodes", "MagicLoot_Codes", function(v)
+    Farm.UI.toggle(RewardsTab, "Auto Codes", "AutoCodes", "MagicLoot_v46_Codes", function(v)
         if v then Farm.Runtime.CodesTried = false; task.spawn(redeemCodesOnce) end
     end)
-    Farm.UI.toggle(RewardsTab, "Daily Rewards", "AutoDaily", "MagicLoot_Daily")
-    Farm.UI.toggle(RewardsTab, "Online Rewards", "AutoOnline", "MagicLoot_Online")
-    Farm.UI.toggle(RewardsTab, "Completed Event Quests", "AutoEventQuestClaims", "MagicLoot_v15_EventClaims")
-    Farm.UI.toggle(RewardsTab, "Farm Dungeon Event Quests", "AutoFarmEventQuests", "MagicLoot_v15_FarmEventQuests", function(v)
+    Farm.UI.toggle(RewardsTab, "Auto Daily Rewards", "AutoDaily", "MagicLoot_v46_Daily")
+    Farm.UI.toggle(RewardsTab, "Auto Online Rewards", "AutoOnline", "MagicLoot_v46_Online")
+    Farm.UI.toggle(RewardsTab, "Auto Event Quest Rewards", "AutoEventQuestClaims", "MagicLoot_v46_EventClaims")
+    Farm.UI.toggle(RewardsTab, "Farm Dungeon Event Quests", "AutoFarmEventQuests", "MagicLoot_v46_EventFarm", function(v)
         if v then Farm.Runtime.LastDungeonAt = -math.huge end
     end)
-    Farm.UI.toggle(RewardsTab, "Collection Index Capacity Rewards", "AutoIndexRewards", "MagicLoot_v15_IndexRewards")
-    Farm.UI.button(RewardsTab, "Claim Available Rewards Now", function()
-        task.spawn(function()
-            pcall(claimDaily); task.wait(0.20)
-            pcall(claimOnline); task.wait(0.20)
-            pcall(claimEventTasks); task.wait(0.20)
-            pcall(claimIndexRewards)
-        end)
-    end)
+    Farm.UI.toggle(RewardsTab, "Auto Collection Rewards", "AutoIndexRewards", "MagicLoot_v46_IndexRewards")
+
+    -- SETTINGS: deliberately tiny. Most players should never need Advanced.
     SettingsTab:CreateSection("Movement")
-    Farm.UI.dropdown(SettingsTab, "Movement Mode", "MovementMode", "MagicLoot_MoveMode", { "Tween", "Walk" }, "Tween")
-    Farm.UI.slider(SettingsTab, "Tween Speed", "TweenSpeed", "MagicLoot_TweenSpeed",
+    Farm.UI.mappedDropdown(SettingsTab, "Movement Mode", "MovementMode", "MagicLoot_v46_MoveMode", {
+        { "Smooth", "Tween" },
+        { "Walk", "Walk" },
+    }, "Tween", function()
+        refreshAdvancedVisibility()
+    end)
+    SettingsTab:CreateSection("Script")
+    Farm.UI.button(SettingsTab, "Unload Autofarm", function() Farm:Unload() end)
+
+    -- ADVANCED: dependencies are grouped and named explicitly so a user knows
+    -- when they matter instead of seeing every implementation control at once.
+    SmartLootAdvancedSection = AdvancedTab:CreateSection("Smart Loot")
+    Farm.UI.toggle(AdvancedTab, "Prioritize New Collection Loot", "PrioritizeUnseenIndexLoot", "MagicLoot_v46_IndexLoot")
+    Farm.UI.slider(AdvancedTab, "Smart Loot Quality", "SmartLootQualityPercent", "MagicLoot_v46_SmartLootQuality",
+        { 30, 95 }, 5, function(v) return math.clamp(tonumber(v) or 65, 30, 95) end)
+
+    AutoSellAdvancedSection = AdvancedTab:CreateSection("Auto Sell")
+    Farm.UI.slider(AdvancedTab, "Sell At Backpack %", "AutoSellThresholdPercent", "MagicLoot_v46_SellThreshold",
+        { 60, 100 }, 1, function(v) return math.clamp(tonumber(v) or 100, 60, 100) end)
+    Farm.UI.slider(AdvancedTab, "Reserved Backpack Space", "BackpackReserveSlots", "MagicLoot_v46_BackpackReserve",
+        { 0, 5 }, 1, function(v) return math.clamp(math.floor(tonumber(v) or 0), 0, 5) end)
+    Farm.UI.toggle(AdvancedTab, "Protect Recipe Materials While Selling", "TemporarilyUnmarkAlchemyForSell", "MagicLoot_v46_RecipeSelling")
+    Farm.UI.toggle(AdvancedTab, "Resume Dungeon After Selling", "ResumeDungeonAfterSell", "MagicLoot_v46_ResumeAfterSell")
+
+    AdvancedTab:CreateSection("Combat")
+    Farm.UI.toggle(AdvancedTab, "Wait For Boss Intro", "WaitForBossIntro", "MagicLoot_v46_BossIntro")
+    Farm.UI.toggle(AdvancedTab, "Hold Position Between Enemies", "PersistCombatPosition", "MagicLoot_v46_PositionHold")
+    Farm.UI.slider(AdvancedTab, "Position Hold Time", "TargetSwitchGraceSeconds", "MagicLoot_v46_HoldTime",
+        { 0.05, 0.8 }, 0.05, function(v) return math.clamp(tonumber(v) or 0.20, 0.05, 0.8) end)
+    Farm.UI.toggle(AdvancedTab, "Stay Locked To Enemy", "CombatDirectLock", "MagicLoot_v46_DirectLock")
+    Farm.UI.toggle(AdvancedTab, "Combat Noclip", "CombatNoclip", "MagicLoot_v46_CombatNoclip", function(v)
+        if not v then Farm.Position.setNoclip(false) end
+    end)
+    Farm.UI.toggle(AdvancedTab, "Always Face Enemy", "CombatFaceTarget", "MagicLoot_v46_FaceEnemy")
+
+    OrbitAdvancedSection = AdvancedTab:CreateSection("Orbit")
+    Farm.UI.slider(AdvancedTab, "Orbit Speed", "DungeonOrbitSpeed", "MagicLoot_v46_OrbitSpeed",
+        { 0.1, 2.0 }, 0.1, function(v) return math.max(0.1, tonumber(v) or 0.65) end)
+
+    AdvancedTab:CreateSection("Dungeon Recovery")
+    Farm.UI.slider(AdvancedTab, "Re-entry Attempts", "DungeonReentryAttempts", "MagicLoot_v46_ReentryAttempts",
+        { 1, 6 }, 1, function(v) return math.clamp(math.floor(tonumber(v) or 3), 1, 6) end)
+    Farm.UI.slider(AdvancedTab, "Time In Dungeon", "DungeonBurstSeconds", "MagicLoot_v46_DungeonTime",
+        { 10, 90 }, 1, function(v) return tonumber(v) or 28 end)
+    Farm.UI.slider(AdvancedTab, "Time Between Dungeon Runs", "DungeonCooldownSeconds", "MagicLoot_v46_DungeonCooldown",
+        { 30, 300 }, 5, function(v) return tonumber(v) or 28 end)
+
+    AdvancedTab:CreateSection("Gear")
+    Farm.UI.toggle(AdvancedTab, "Always Hold Best Wand", "AutoHoldBestWand", "MagicLoot_v46_HoldBestWand", function(v)
+        if v then task.spawn(function() pcall(Farm.Fast.ensureBestWandHeld, "toggle", 0.18) end) end
+    end)
+
+    SmoothMovementAdvancedSection = AdvancedTab:CreateSection("Smooth Movement")
+    Farm.UI.slider(AdvancedTab, "Smooth Movement Speed", "TweenSpeed", "MagicLoot_v46_TweenSpeed",
         { 20, 120 }, 1, function(v) return tonumber(v) or 85 end)
-    Farm.UI.toggle(SettingsTab, "Keep Current Paid Training Zone", "IncludeCurrentPaidZone", "MagicLoot_PaidZone", function()
+
+    AdvancedTab:CreateSection("Training")
+    Farm.UI.toggle(AdvancedTab, "Keep Current Paid Training Zone", "IncludeCurrentPaidZone", "MagicLoot_v46_PaidZone", function()
         Farm.Runtime.LastTrainDecisionAt = -math.huge
     end)
-    Farm.UI.button(SettingsTab, "Unload Autofarm", function() Farm:Unload() end)
+
+    refreshAdvancedVisibility()
 end
 
 -- ============================================================================
@@ -4544,7 +4756,7 @@ if PuckUI and type(PuckUI.Notify) == "function" then
     pcall(function()
         PuckUI:Notify({
             Title = "PuckAFK",
-            Content = "Magic Loot v4.3 loaded.",
+            Content = "Magic Loot v4.7 loaded.",
             Duration = 4,
         })
     end)
