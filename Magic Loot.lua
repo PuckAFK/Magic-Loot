@@ -1,5 +1,5 @@
 --[[
-    PuckAFK | Magic Loot | Autofarm v4.2.1 RELEASE
+    PuckAFK | Magic Loot | Autofarm v4.5 RELEASE
     Place: 133188236593503
     Release build with responsive desktop / phone interface.
 ]]
@@ -22,8 +22,11 @@ if type(getgenv) == "function" then
 else
     GENV = _G
 end
-local SCRIPT_KEY = "__PUCKAFK_MAGIC_LOOT_DIRECT_V4_2_1"
+local SCRIPT_KEY = "__PUCKAFK_MAGIC_LOOT_DIRECT_V4_5"
 for _, oldKey in ipairs({
+    "__PUCKAFK_MAGIC_LOOT_DIRECT_V4_4",
+    "__PUCKAFK_MAGIC_LOOT_DIRECT_V4_3",
+    "__PUCKAFK_MAGIC_LOOT_DIRECT_V4_2_1",
     "__PUCKAFK_MAGIC_LOOT_DIRECT_V4_2",
     "__PUCKAFK_MAGIC_LOOT_DIRECT_V4_1",
     "__PUCKAFK_MAGIC_LOOT_DIRECT_V4_0",
@@ -75,7 +78,6 @@ if okUtils then
     UtilsSystem = utilsResult
 end
 if type(UtilsSystem) ~= "table" then
-    warn("[PuckAFK Magic Loot] UtilsSystem unavailable")
     return
 end
 local GetData = UtilsSystem.GetData
@@ -90,7 +92,6 @@ local HumanModule = UtilsSystem.HumanModule
 local SystemDungeon = UtilsSystem.SystemDungeon
 local DwarfKingAppearPresentation = UtilsSystem.DwarfKingAppearPresentation
 if type(NetMsg) ~= "table" or type(NetWork) ~= "table" then
-    warn("[PuckAFK Magic Loot] networking layer unavailable")
     return
 end
 local PlayerSkillControlHub = nil
@@ -177,16 +178,19 @@ local Farm = {
         BackpackReserveSlots = 0,
         LootPriority = "Smart",
         PrioritizeUnseenIndexLoot = false,
-        SmartLootQualityPercent = 30,
+        SmartLootQualityPercent = 65,
         SmartLootBatchWaitSeconds = 0.35,
+        SmartLootDeepStagePercent = 82,
+        SmartLootFinalHarvestSeconds = 6.0,
+        SmartLootAlwaysRarity = 5,
         TemporarilyUnmarkAlchemyForSell = true,
         ResumeDungeonAfterSell = true,
         DungeonBurstSeconds = 28,
         DungeonCooldownSeconds = 28,
         DungeonReentryAttempts = 3,
         DungeonReentryDelay = 0.20,
-        DungeonEnemyRange = 40,
-        DungeonPositionMode = "Behind",
+        DungeonEnemyRange = 19,
+        DungeonPositionMode = "Overhead",
         DungeonOrbitSpeed = 0.65,
         CombatDirectLock = true,
         CombatNoclip = true,
@@ -206,7 +210,6 @@ local Farm = {
     },
     Runtime = {
         Phase = "Starting",
-        LastError = nil,
         TrainSource = "None",
         TrainGain = 0,
         TrainClicks = 0,
@@ -320,12 +323,8 @@ end
 local function setPhase(text)
     Farm.Runtime.Phase = tostring(text or "")
 end
-local function setError(err)
-    if err == nil then
-        Farm.Runtime.LastError = nil
-    else
-        Farm.Runtime.LastError = tostring(err)
-    end
+local function setError(_)
+    -- Errors are intentionally not surfaced or retained in the release UI.
 end
 local function safeInvoke(message, ...)
     if not message then
@@ -2709,7 +2708,7 @@ end
 -- ============================================================================
 Farm.Position = Farm.Position or {}
 function Farm.Position.mode()
-    return tostring(Farm.Config.DungeonPositionMode or "Behind")
+    return tostring(Farm.Config.DungeonPositionMode or "Overhead")
 end
 function Farm.Position.enemyClearance(enemy)
     local extra = 0
@@ -2748,7 +2747,7 @@ function Farm.Position.desiredCFrame(enemy)
         return nil
     end
     local enemyPos = enemyCF.Position
-    local requested = math.clamp(tonumber(Farm.Config.DungeonEnemyRange) or 40, 6, 55)
+    local requested = math.clamp(tonumber(Farm.Config.DungeonEnemyRange) or 19, 6, 55)
     local look = enemyCF.LookVector
     local flat = Vector3.new(look.X, 0, look.Z)
     if flat.Magnitude < 0.05 then
@@ -2980,7 +2979,7 @@ function Farm.Position.stageAnchor(area)
         return nil
     end
     local mode = Farm.Position.mode()
-    local requested = math.clamp(tonumber(Farm.Config.DungeonEnemyRange) or 40, 6, 55)
+    local requested = math.clamp(tonumber(Farm.Config.DungeonEnemyRange) or 19, 6, 55)
     local center = area.Position
     local look = area.CFrame.LookVector
     local flat = Vector3.new(look.X, 0, look.Z)
@@ -3217,14 +3216,57 @@ local function returnToTownAndSell(reason)
     return sold
 end
 local PickupPrompts = setmetatable({}, {__mode = "k"})
+local LastPickupPromptScanAt = -math.huge
+local function getDropsClientRoot()
+    local root = Workspace:FindFirstChild("DropsClient")
+    return root and root:IsA("Model") and root or nil
+end
+local function promptLooksLikeDungeonLoot(inst)
+    if not (inst and inst:IsA("ProximityPrompt")) then
+        return false
+    end
+    if inst.Name == "PickupPrompt" then
+        return true
+    end
+    local node = inst.Parent
+    while node and node ~= Workspace do
+        if node:IsA("Model") then
+            if node:GetAttribute("ItemId") ~= nil
+                or node:GetAttribute("DropId") ~= nil
+                or node:GetAttribute("DropID") ~= nil
+                or node.Name == "DropItem" then
+                return true
+            end
+        end
+        node = node.Parent
+    end
+    local action = string.lower(tostring(inst.ActionText or ""))
+    local object = string.lower(tostring(inst.ObjectText or ""))
+    return string.find(action, "pick", 1, true) ~= nil
+        or string.find(action, "collect", 1, true) ~= nil
+        or string.find(object, "loot", 1, true) ~= nil
+        or string.find(object, "drop", 1, true) ~= nil
+end
 local function registerPickupPrompt(inst)
-    if inst and inst:IsA("ProximityPrompt") and inst.Name == "PickupPrompt" then
+    if promptLooksLikeDungeonLoot(inst) then
         PickupPrompts[inst] = true
     end
 end
-for _, inst in ipairs(Workspace:GetDescendants()) do
-    registerPickupPrompt(inst)
+local function refreshPickupPrompts(force)
+    local now = os.clock()
+    if not force and now - LastPickupPromptScanAt < 0.15 then
+        return
+    end
+    LastPickupPromptScanAt = now
+    -- Magic Loot's real client drop controller stores active dungeon drops under
+    -- Workspace.DropsClient/<rarity>/<dropId>/Root/PickupPrompt.
+    local root = getDropsClientRoot()
+    local scanRoot = root or Workspace
+    for _, inst in ipairs(scanRoot:GetDescendants()) do
+        registerPickupPrompt(inst)
+    end
 end
+refreshPickupPrompts(true)
 track(Workspace.DescendantAdded:Connect(registerPickupPrompt))
 track(Workspace.DescendantRemoving:Connect(function(inst)
     if PickupPrompts[inst] then
@@ -3237,11 +3279,21 @@ local RARITY_NAMES = {
 }
 local function getDropModelFromPrompt(prompt)
     local node = prompt and prompt.Parent
+    local fallback = nil
     while node and node ~= Workspace do
-        if node:IsA("Model") and node:GetAttribute("ItemId") ~= nil then return node end
+        if node:IsA("Model") then
+            if node:GetAttribute("ItemId") ~= nil then
+                return node
+            end
+            if not fallback and (node.Name == "DropItem"
+                or node:GetAttribute("DropId") ~= nil
+                or node:GetAttribute("DropID") ~= nil) then
+                fallback = node
+            end
+        end
         node = node.Parent
     end
-    return nil
+    return fallback
 end
 Farm.Loot = Farm.Loot or {}
 Farm.Loot.PickupCooldown = Farm.Loot.PickupCooldown or setmetatable({}, {__mode = "k"})
@@ -3292,13 +3344,26 @@ local function getDropInfo(prompt)
         value = tonumber(cfg.GoldValue) or value
     end
     local name = cfg and (cfg.ZhName or cfg.Name) or (drop.Name ~= "DropItem" and drop.Name or tostring(itemId or "Drop"))
+    local dropId = drop:GetAttribute("DropId")
+        or drop:GetAttribute("DropID")
+        or drop:GetAttribute("UID")
+        or drop:GetAttribute("Uid")
+        or drop:GetAttribute("Guid")
+        or drop:GetAttribute("GUID")
+        or drop:GetAttribute("Id")
+        or drop:GetAttribute("ID")
+    -- Game-verified: DropVisual creates the model with Name = dropId, then the
+    -- native PickupPrompt callback fires NetMsg.DROP_PICKUP with that same key.
+    if dropId == nil and type(drop.Name) == "string" and drop.Name ~= "" and drop.Name ~= "DropItem" then
+        dropId = drop.Name
+    end
     return {
         model = drop,
         id = itemId,
         rarity = math.max(1, math.floor(xyd or 1)),
         value = math.max(0, value or 0),
         name = tostring(name or itemId or "Drop"),
-        dropId = (drop.Name ~= "DropItem" and tostring(drop.Name) or nil),
+        dropId = dropId,
         stage = math.max(0, math.floor(tonumber(drop:GetAttribute("Stage")) or 0)),
         landed = drop:GetAttribute("DropLanded") == true or (prompt and prompt.Enabled == true),
         areaId = cfg and tonumber(cfg.AreaID) or nil,
@@ -3310,7 +3375,62 @@ function Farm.Loot.stageMatches(info, stage)
     local dropStage = math.max(0, math.floor(tonumber(info.stage) or 0))
     return stage <= 0 or dropStage <= 0 or dropStage == stage
 end
+
+-- Smart loot is deliberately progression-biased. Dungeon loot improves as the
+-- run goes deeper, so filling LimitBagUsed on the opening stages wastes slots.
+-- CareerMaxStage is the best practical estimate of where this character can
+-- reach again; the final few seconds become a harvest window if the run is
+-- slower than expected.
+function Farm.Loot.deepStagePlan(stage)
+    stage = math.max(1, math.floor(tonumber(stage) or 1))
+    local career = math.max(0, math.floor(tonumber(getCareerMaxStage()) or 0))
+    local target = math.max(stage, career > 0 and (career + 1) or stage)
+    local pct = math.clamp((tonumber(Farm.Config.SmartLootDeepStagePercent) or 82) / 100, 0.50, 1.00)
+    local harvestStart = math.max(stage > target and stage or 1, math.floor(target * pct + 0.5))
+    harvestStart = math.min(harvestStart, target)
+    local deadline = tonumber(Farm.Runtime.DungeonSessionDeadline) or 0
+    local remaining = deadline > 0 and math.max(0, deadline - os.clock()) or math.huge
+    local finalSeconds = math.clamp(tonumber(Farm.Config.SmartLootFinalHarvestSeconds) or 6.0, 2.0, 12.0)
+    local finalWindow = remaining <= finalSeconds
+    return target, harvestStart, remaining, finalWindow
+end
+
+function Farm.Loot.smartEligible(info, stage, batchMax, threshold, questTargets, unseen)
+    if type(info) ~= "table" then return false end
+    local itemId = tonumber(info.id)
+    if Farm.Config.AutoFarmEventQuests and itemId and questTargets and questTargets[itemId] then
+        return true, "quest"
+    end
+    if Farm.Config.PrioritizeUnseenIndexLoot and itemId and unseen and unseen[itemId] then
+        return true, "index"
+    end
+
+    local alwaysRarity = math.clamp(math.floor(tonumber(Farm.Config.SmartLootAlwaysRarity) or 5), 3, 7)
+    if (tonumber(info.rarity) or 1) >= alwaysRarity then
+        return true, "exceptional rarity"
+    end
+
+    local target, harvestStart, remaining, finalWindow = Farm.Loot.deepStagePlan(stage)
+    local deepEnough = stage >= harvestStart
+    if not deepEnough and not finalWindow then
+        return false, string.format("saving slots for stage %d+", harvestStart)
+    end
+
+    local qualityRatio = math.clamp((tonumber(Farm.Config.SmartLootQualityPercent) or 65) / 100, 0.10, 0.95)
+    -- During the emergency/final harvest window, loosen the floor a little, but
+    -- still never fall back to collecting every cheap leftover.
+    if finalWindow and stage < harvestStart then
+        qualityRatio = math.max(0.45, qualityRatio * 0.78)
+    end
+    local dynamicFloor = math.max(tonumber(threshold) or 0, (tonumber(batchMax) or 0) * qualityRatio)
+    if (tonumber(info.value) or 0) >= dynamicFloor then
+        return true, finalWindow and "final harvest" or "deep-stage premium"
+    end
+
+    return false, string.format("below smart floor %.0f", dynamicFloor)
+end
 function Farm.Loot.collectStageCandidates(maxDistance)
+    refreshPickupPrompts(false)
     local results = {}
     local _, _, root = getCharacter()
     if not root then return results end
@@ -3321,7 +3441,7 @@ function Farm.Loot.collectStageCandidates(maxDistance)
             local dist = (root.Position - inst.Parent.Position).Magnitude
             if dist <= radius then
                 local info = getDropInfo(inst)
-                if info and info.landed and Farm.Loot.stageMatches(info, stage) then
+                if info and Farm.Loot.stageMatches(info, stage) then
                     local cooldown = Farm.Loot.PickupCooldown and Farm.Loot.PickupCooldown[info.model] or 0
                     if os.clock() >= (tonumber(cooldown) or 0) then
                         results[#results + 1] = { prompt = inst, dist = dist, info = info }
@@ -3366,14 +3486,12 @@ function Farm.Loot.batchReady(maxDistance)
     local elapsed = now - (Farm.Loot.BatchStartedAt or now)
     local firstElapsed = Farm.Loot.BatchFirstPromptAt and (now - Farm.Loot.BatchFirstPromptAt) or 0
     local quiet = now - (Farm.Loot.BatchLastChangeAt or now)
-    local configuredWait = math.clamp(tonumber(Farm.Config.SmartLootBatchWaitSeconds) or 0.35, 0.15, 0.80)
+    local configuredWait = math.clamp(tonumber(Farm.Config.SmartLootBatchWaitSeconds) or 0.35, 0.15, 1.10)
     local settleFirst = math.min(0.24, configuredWait * 0.70)
     local settleQuiet = math.min(0.10, configuredWait * 0.30)
     if (count > 0 and firstElapsed >= settleFirst and quiet >= settleQuiet) or elapsed >= configuredWait then
         Farm.Runtime.LootBatchReady = true
-        local _, bagMax = getDungeonBagUsage()
-        local baseRatio = math.clamp((tonumber(Farm.Config.SmartLootQualityPercent) or 30) / 100, 0.05, 0.90)
-        local qualityRatio = bagMax <= 2 and baseRatio or (bagMax <= 4 and baseRatio * 0.75 or baseRatio * 0.55)
+        local qualityRatio = math.clamp((tonumber(Farm.Config.SmartLootQualityPercent) or 65) / 100, 0.10, 0.95)
         Farm.Runtime.LootBatchThreshold = maxValue > 0 and (maxValue * qualityRatio) or 0
         Farm.Runtime.LootDecision = string.format(
             "Stage %d batch %d • premium >= %s • batch max %s",
@@ -3392,6 +3510,7 @@ function Farm.Loot.batchReady(maxDistance)
 end
 local function bestPickupPrompt(maxDistance)
     if backpackPressureReached() then return nil, math.huge end
+    refreshPickupPrompts(false)
     local _, _, root = getCharacter()
     if not root then return nil, math.huge end
     local mode = tostring(Farm.Config.LootPriority or "Smart")
@@ -3411,7 +3530,7 @@ local function bestPickupPrompt(maxDistance)
             if dist <= (maxDistance or 80) then
                 local info = getDropInfo(inst)
                 local cooldown = info and Farm.Loot.PickupCooldown and Farm.Loot.PickupCooldown[info.model] or 0
-                if info and os.clock() >= (tonumber(cooldown) or 0) and (mode ~= "Smart" or (info.landed and Farm.Loot.stageMatches(info, stage))) then
+                if info and os.clock() >= (tonumber(cooldown) or 0) and (mode ~= "Smart" or Farm.Loot.stageMatches(info, stage)) then
                     local score = nil
                     if mode == "Nearest" then
                         score = -dist
@@ -3420,10 +3539,18 @@ local function bestPickupPrompt(maxDistance)
                     elseif mode == "Rarity" then
                         score = info.rarity * 1000000000 + info.value * 100 - dist
                     else
-                        local questBoost = Farm.Config.AutoFarmEventQuests and info.id and questTargets[info.id] and 1 or 0
-                        local unseenBoost = info.id and unseen[info.id] and 1 or 0
-                        if questBoost > 0 or info.value >= threshold then
-                            score = questBoost * 1e18 + info.value * 1e7 + info.rarity * 1e4 + unseenBoost * 1e2 - dist
+                        local eligible, reason = Farm.Loot.smartEligible(info, stage, batchMax, threshold, questTargets, unseen)
+                        if eligible then
+                            local questBoost = Farm.Config.AutoFarmEventQuests and info.id and questTargets[info.id] and 1 or 0
+                            local unseenBoost = info.id and unseen[info.id] and 1 or 0
+                            local premiumBoost = info.value >= threshold and 1 or 0
+                            score = questBoost * 1e18
+                                + unseenBoost * 5e17
+                                + premiumBoost * 1e16
+                                + info.rarity * 1e12
+                                + info.value * 1e4
+                                - dist
+                            info.smartReason = reason
                         end
                     end
                     if score and score > bestScore then
@@ -3439,17 +3566,18 @@ local function bestPickupPrompt(maxDistance)
         if bestInfo then
             local pct = batchMax > 0 and math.floor((bestInfo.value / batchMax) * 100 + 0.5) or 100
             Farm.Runtime.LootDecision = string.format(
-                "Stage %d pick %s • %s Gold • %d%% of batch max • floor %s",
+                "Stage %d pick %s • %s Gold • %d%% of batch max • %s",
                 stage,
                 tostring(bestInfo.name),
                 tostring(math.floor(bestInfo.value)),
                 pct,
-                tostring(math.floor(threshold))
+                tostring(bestInfo.smartReason or "smart")
             )
         else
+            local target, harvestStart, remaining, finalWindow = Farm.Loot.deepStagePlan(stage)
             Farm.Runtime.LootDecision = string.format(
-                "Stage %d skipping low-value leftovers • premium floor %s",
-                stage, tostring(math.floor(threshold))
+                "Stage %d skipped cheap loot • harvest stage %d+ • target %d • %.1fs left%s",
+                stage, harvestStart, target, remaining == math.huge and 0 or remaining, finalWindow and " • final window" or ""
             )
         end
     end
@@ -3464,13 +3592,16 @@ local function triggerPickup(prompt)
         return false
     end
     local beforeUsed = select(1, getDungeonBagUsage())
+    local beforeItemCount = info.id and getItemCountById(info.id) or nil
     if backpackPressureReached() then
         Farm.Runtime.EmergencySellRequested = true
         return false
     end
+    local maxActivationDistance = math.max(4, tonumber(prompt.MaxActivationDistance) or 10)
     local target = prompt.Parent.Position
-    if not moveTo(target, math.max(2, (prompt.MaxActivationDistance or 10) * 0.60), 8) then
-        Farm.Loot.PickupCooldown[info.model] = os.clock() + 0.35
+    local pickupReach = math.clamp(maxActivationDistance * 0.28, 1.5, 3.25)
+    if not moveTo(target, pickupReach, 8) then
+        Farm.Loot.PickupCooldown[info.model] = os.clock() + 0.25
         return false
     end
     if backpackPressureReached() then
@@ -3479,38 +3610,59 @@ local function triggerPickup(prompt)
     end
     local function confirmed()
         if not info.model or not info.model.Parent then return true end
-        return select(1, getDungeonBagUsage()) > beforeUsed
+        if not prompt or not prompt.Parent then return true end
+        if select(1, getDungeonBagUsage()) > beforeUsed then return true end
+        if beforeItemCount ~= nil and info.id then
+            local nowCount = getItemCountById(info.id)
+            if nowCount ~= nil and nowCount > beforeItemCount then return true end
+        end
+        return false
     end
-    local requested = false
-    if info.dropId and NetMsg.DROP_PICKUP then
-        requested = safeFire(NetMsg.DROP_PICKUP, info.dropId)
-        if requested then
-            local deadline = os.clock() + 0.30
-            while Farm.Running and os.clock() < deadline and not confirmed() do
-                task.wait(0.018)
-            end
+    if info.dropId ~= nil and NetMsg.DROP_PICKUP then
+        safeFire(NetMsg.DROP_PICKUP, info.dropId)
+        local deadline = os.clock() + 0.34
+        while Farm.Running and os.clock() < deadline and not confirmed() do
+            task.wait(0.018)
         end
     end
     if not confirmed() then
         local wasEnabled = prompt.Enabled
-        pcall(function() prompt.Enabled = true end)
-        local fired = false
-        if type(fireproximityprompt) == "function" then
-            fired = pcall(fireproximityprompt, prompt, prompt.HoldDuration or 0)
+        local oldHoldDuration = prompt.HoldDuration
+        pcall(function()
+            prompt.Enabled = true
+            prompt.HoldDuration = 0
+        end)
+        for attempt = 1, 3 do
+            if confirmed() then break end
+            local fired = false
+            if type(fireproximityprompt) == "function" then
+                fired = pcall(function()
+                    fireproximityprompt(prompt, 0)
+                end)
+            end
+            if not fired then
+                pcall(function()
+                    prompt:InputHoldBegin()
+                    task.wait(0.035)
+                    prompt:InputHoldEnd()
+                end)
+            end
+            local deadline = os.clock() + (attempt == 1 and 0.30 or 0.22)
+            while Farm.Running and os.clock() < deadline and not confirmed() do
+                task.wait(0.018)
+            end
+            if not confirmed() and attempt == 1 then
+                local _, _, root = getCharacter()
+                if root and prompt.Parent and prompt.Parent:IsA("BasePart") then
+                    moveTo(prompt.Parent.Position, 1.5, 2.5)
+                end
+            end
         end
-        if not fired then
-            fired = pcall(function()
-                prompt:InputHoldBegin()
-                task.wait(math.max(0.02, tonumber(prompt.HoldDuration) or 0) + 0.025)
-                prompt:InputHoldEnd()
+        if prompt and prompt.Parent then
+            pcall(function()
+                prompt.HoldDuration = oldHoldDuration
+                prompt.Enabled = wasEnabled
             end)
-        end
-        local deadline = os.clock() + 0.42
-        while Farm.Running and os.clock() < deadline and not confirmed() do
-            task.wait(0.02)
-        end
-        if prompt.Parent then
-            pcall(function() prompt.Enabled = wasEnabled end)
         end
     end
     local picked = confirmed()
@@ -3523,8 +3675,9 @@ local function triggerPickup(prompt)
             "Picked %s • %s Gold • stage %s",
             tostring(info.name), tostring(math.floor(tonumber(info.value) or 0)), tostring(info.stage or 0)
         )
+        Farm.Loot.PickupCooldown[info.model] = nil
     else
-        Farm.Loot.PickupCooldown[info.model] = os.clock() + 0.45
+        Farm.Loot.PickupCooldown[info.model] = os.clock() + 0.30
         Farm.Runtime.LootDecision = string.format("Pickup retry queued • %s • stage %s", tostring(info.name), tostring(info.stage or 0))
     end
     if backpackPressureReached() then
@@ -3533,6 +3686,41 @@ local function triggerPickup(prompt)
     end
     return picked
 end
+
+function Farm.Loot.autoPickupTick()
+    if not (Farm.Running and Farm.Config.Master and Farm.Config.AutoDungeonLoot) then
+        return false
+    end
+    if not isInDungeon() or Farm.Runtime.Selling or Farm.Runtime.GearTransaction then
+        return false
+    end
+    if backpackPressureReached() then
+        Farm.Runtime.EmergencySellRequested = true
+        return false
+    end
+    -- Do NOT gate loot on InStageSafeArea. The game's own DropVisual enables
+    -- PickupPrompt for the active stage before that flag necessarily becomes true.
+    -- Only pause pickup while a real enemy/boss presentation is still active.
+    if bossIntroPlaying() or #gatherEnemies() > 0 then
+        return false
+    end
+    Farm.Position.release(false)
+    setNativeTarget(nil)
+    if tostring(Farm.Config.LootPriority or "Smart") == "Smart" and not Farm.Loot.batchReady(100) then
+        return false
+    end
+    local prompt = bestPickupPrompt(100)
+    if not prompt then
+        return false
+    end
+    if not acquireMovement("DungeonLoot", 8) then
+        return false
+    end
+    local ok = triggerPickup(prompt)
+    releaseMovement("DungeonLoot")
+    return ok
+end
+
 local function tryEnterDungeon()
     if isInDungeon() then return true end
     if Farm.Config.AutoHoldBestWand then
@@ -3702,8 +3890,11 @@ local function dungeonStep()
             return true
         end
     end
-    if Farm.Config.AutoDungeonLoot and not Farm.Fast.nativeDungeonCombatBlocked() then
+    if Farm.Config.AutoDungeonLoot then
+        -- We are already in the no-enemy branch here. Collect current-stage drops
+        -- before moving into the next battle area, even if InStageSafeArea is false.
         Farm.Position.release(false)
+        setNativeTarget(nil)
         if tostring(Farm.Config.LootPriority or "Smart") == "Smart" and not Farm.Loot.batchReady(90) then
             setPhase("Waiting for full stage loot batch")
             return true
@@ -3803,8 +3994,10 @@ function Farm.Dungeon.finishSession(reason)
     if isInDungeon() and not backpackPressureReached() and Farm.Fast.nativeDungeonCombatBlocked() then
         Farm.Dungeon.waitForSafeExit(4.0)
     end
-    if Farm.Config.AutoDungeonLoot and isInDungeon() and not backpackPressureReached() and not Farm.Fast.nativeDungeonCombatBlocked() then
-        local lootDeadline = os.clock() + 3.0
+    if Farm.Config.AutoDungeonLoot and isInDungeon() and not backpackPressureReached() and #gatherEnemies() == 0 then
+        Farm.Position.release(false)
+        setNativeTarget(nil)
+        local lootDeadline = os.clock() + 4.0
         if tostring(Farm.Config.LootPriority or "Smart") == "Smart" then
             while Farm.Running and os.clock() < lootDeadline and not Farm.Loot.batchReady(100) do
                 task.wait(0.03)
@@ -4043,6 +4236,19 @@ task.spawn(function()
 end)
 task.spawn(function()
     while Farm.Running do
+        if Farm.Config.Master
+            and Farm.Config.AutoDungeonLoot
+            and isInDungeon()
+            and not Farm.Runtime.DungeonRunning
+            and not Farm.Runtime.Selling
+            and not Farm.Runtime.GearTransaction then
+            pcall(Farm.Loot.autoPickupTick)
+        end
+        task.wait(0.08)
+    end
+end)
+task.spawn(function()
+    while Farm.Running do
         if Farm.Config.Master and not Farm.Runtime.GearTransaction and (Farm.Config.AutoDungeonEconomy or Farm.Config.AutoFarmEventQuests) and isInDungeon() and not Farm.Runtime.DungeonRunning then
             Farm.Runtime.DungeonRunning = true
             Farm.Runtime.DungeonStartedAt = os.clock()
@@ -4128,7 +4334,6 @@ end))
 -- ============================================================================
 -- UI
 -- ============================================================================
-local StatusParagraph = nil
 if PuckUI then
     local ok, result = pcall(PuckUI.CreateWindow, PuckUI, {
         Name = "PuckAFK | Magic Loot", GuiName = "PuckAFK_MagicLoot", Width = 530, Height = 590,
@@ -4181,7 +4386,6 @@ if Window then
         task.defer(function() pcall(function() Window:Center() end) end)
     end
     FarmTab:CreateSection("Smart Progression")
-    StatusParagraph = FarmTab:CreateParagraph({ Title = "Magic Loot Autofarm", Content = "Starting...", Height = 112 })
     Farm.UI.toggle(FarmTab, "Master Autofarm", "Master", "MagicLoot_Master", function()
         Farm.Runtime.LastTrainDecisionAt = -math.huge
     end)
@@ -4222,8 +4426,8 @@ if Window then
     Farm.UI.dropdown(DungeonTab, "Loot Priority", "LootPriority", "MagicLoot_v40_LootPriority",
         { "Smart", "Rarity", "Value", "Nearest" }, "Smart")
     Farm.UI.toggle(DungeonTab, "Prioritize New Collection Index Loot", "PrioritizeUnseenIndexLoot", "MagicLoot_v40_IndexLoot")
-    Farm.UI.slider(DungeonTab, "Smart Loot Quality %", "SmartLootQualityPercent", "MagicLoot_v40_SmartLootQuality",
-        { 10, 80 }, 5, function(v) return math.clamp(tonumber(v) or 30, 10, 80) end)
+    Farm.UI.slider(DungeonTab, "Smart Loot Quality %", "SmartLootQualityPercent", "MagicLoot_v45_SmartLootQuality",
+        { 30, 95 }, 5, function(v) return math.clamp(tonumber(v) or 65, 30, 95) end)
     Farm.UI.toggle(DungeonTab, "Auto Sell Materials", "AutoSellMaterials", "MagicLoot_v14_Sell")
     Farm.UI.slider(DungeonTab, "Return To Sell At %", "AutoSellThresholdPercent", "MagicLoot_v15_SellThreshold",
         { 60, 100 }, 1, function(v) return math.clamp(tonumber(v) or 100, 60, 100) end)
@@ -4236,10 +4440,10 @@ if Window then
     Farm.UI.toggle(DungeonTab, "Keep Safe Position Between Enemies", "PersistCombatPosition", "MagicLoot_PersistCombatPosition")
     Farm.UI.slider(DungeonTab, "Enemy Handoff Hold", "TargetSwitchGraceSeconds", "MagicLoot_TargetSwitchGrace",
         { 0.05, 0.8 }, 0.05, function(v) return math.clamp(tonumber(v) or 0.20, 0.05, 0.8) end)
-    Farm.UI.slider(DungeonTab, "Enemy Distance", "DungeonEnemyRange", "MagicLoot_EnemyDistance",
-        { 6, 55 }, 1, function(v) return math.clamp(tonumber(v) or 40, 6, 55) end)
-    Farm.UI.dropdown(DungeonTab, "Enemy Position Mode", "DungeonPositionMode", "MagicLoot_PositionMode",
-        { "Normal", "Behind", "Front", "Side", "Left", "Overhead", "Below", "Orbit" }, "Behind",
+    Farm.UI.slider(DungeonTab, "Enemy Distance", "DungeonEnemyRange", "MagicLoot_v44_EnemyDistance",
+        { 6, 55 }, 1, function(v) return math.clamp(tonumber(v) or 19, 6, 55) end)
+    Farm.UI.dropdown(DungeonTab, "Enemy Position Mode", "DungeonPositionMode", "MagicLoot_v44_PositionMode",
+        { "Normal", "Behind", "Front", "Side", "Left", "Overhead", "Below", "Orbit" }, "Overhead",
         function(v) if v == "Normal" then Farm.Position.release(false) end end)
     Farm.UI.toggle(DungeonTab, "Direct Enemy Lock", "CombatDirectLock", "MagicLoot_DirectEnemyLock")
     Farm.UI.toggle(DungeonTab, "Combat Noclip", "CombatNoclip", "MagicLoot_CombatNoclip", function(v)
@@ -4292,49 +4496,7 @@ if Window then
     end)
     Farm.UI.button(SettingsTab, "Unload Autofarm", function() Farm:Unload() end)
 end
-task.spawn(function()
-    while Farm.Running do
-        if StatusParagraph then
-            local nextCfg = getNextRebirthCfg()
-            local need = type(nextCfg) == "table" and math.floor(tonumber(nextCfg.LvNeed) or 0) or 0
-            local gearCost, gearName = Farm.Fast.getNextGearCost()
-            local bagNow, bagMax, bagPct = getDungeonBagUsage()
-            local lastLootRarity = RARITY_NAMES[tonumber(Farm.Runtime.LastLootRarity)] or Farm.Runtime.LastLootRarity
-            local content = string.format(
-                "Level: %s / %s  •  Rebirth: %s  •  Gold: %s\nPower: %s  •  Last gain: %s\nGear: %s  •  Next: %s%s\nWand: %s\nDungeon: %s  •  Stage: %s  •  Target: %s\nPosition: %s @ %s studs  •  %s\nDungeon Bag: %d/%d (%.0f%%)\nLoot: %s  •  %s  •  %s Gold\nRewards: %s quest / %s index  •  Last sell: %s",
-                tostring(getLevel()),
-                tostring(need),
-                tostring(getRebirth()),
-                tostring(math.floor(getGold())),
-                tostring(Farm.Runtime.TrainSource),
-                tostring(Farm.Runtime.TrainGain),
-                tostring(Farm.Runtime.LastGear),
-                tostring(gearName or "None"),
-                gearCost and (" @ " .. tostring(math.floor(gearCost))) or "",
-                tostring(Farm.Runtime.LastHeldWand or "None"),
-                Farm.Runtime.DungeonRunning and "Running" or "Idle",
-                tostring(Farm.Runtime.LastDungeonStage),
-                tostring(Farm.Runtime.LastDungeonTarget),
-                tostring(Farm.Config.DungeonPositionMode),
-                tostring(Farm.Config.DungeonEnemyRange),
-                tostring(Farm.Runtime.PositionState or "Idle"),
-                bagNow,
-                bagMax,
-                bagPct,
-                tostring(Farm.Runtime.LastLoot),
-                tostring(lastLootRarity),
-                tostring(math.floor(tonumber(Farm.Runtime.LastLootValue) or 0)),
-                tostring(Farm.Runtime.EventQuestClaims),
-                tostring(Farm.Runtime.IndexClaims),
-                tostring(Farm.Runtime.LastSellResult)
-            )
-            pcall(function()
-                StatusParagraph:Set({ Title = Farm.Runtime.Phase, Content = content })
-            end)
-        end
-        task.wait(0.5)
-    end
-end)
+
 -- ============================================================================
 -- UNLOAD
 -- ============================================================================
@@ -4378,14 +4540,11 @@ if Window then
         end)
     end)
 end
-if game.PlaceId ~= EXPECTED_PLACE_ID then
-    Farm.Runtime.LastError = "Expected PlaceId " .. tostring(EXPECTED_PLACE_ID) .. ", got " .. tostring(game.PlaceId)
-end
 if PuckUI and type(PuckUI.Notify) == "function" then
     pcall(function()
         PuckUI:Notify({
             Title = "PuckAFK",
-            Content = "Magic Loot v4.2 loaded.",
+            Content = "Magic Loot v4.3 loaded.",
             Duration = 4,
         })
     end)
